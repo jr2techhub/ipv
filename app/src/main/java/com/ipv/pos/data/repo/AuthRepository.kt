@@ -6,6 +6,9 @@ import com.ipv.pos.domain.LoginLockoutPolicy
 import com.ipv.pos.domain.PinHasher
 import com.ipv.pos.domain.Uuidv7
 import com.ipv.pos.domain.UserRole
+import com.ipv.pos.domain.toHex
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Autenticación local (Sprint 0): login por usuario + PIN PBKDF2, bloqueo tras 5 intentos,
@@ -30,7 +33,7 @@ class AuthRepository(
             name = name.trim(),
             role = UserRole.ADMIN.name,
             pin_hash = PinHasher.hash(pin, salt),
-            pin_salt = salt.joinToString("") { "%02x".format(it) },
+            pin_salt = salt.toHex(),
             created_at = now, updated_at = now,
         )
         outbox.withTransaction {
@@ -63,7 +66,11 @@ class AuthRepository(
             return LoginResult.Locked(user.locked_until!!)
         }
 
-        if (PinHasher.verify(pin, user.pin_hash)) {
+        // PBKDF2 (120k iteraciones ≈ decenas de ms en gama baja): se deriva a Dispatchers.Default
+        // para no bloquear el hilo principal si el llamador corre en Main. withContext es
+        // transparente cuando ya se está fuera de Main (no añade latencia perceptible).
+        val pinOk = withContext(Dispatchers.Default) { PinHasher.verify(pin, user.pin_hash) }
+        if (pinOk) {
             val clean = LoginLockoutPolicy.onLoginSuccess()
             if (user.failed_attempts != 0 || user.locked_until != null) {
                 users.update(user.copy(failed_attempts = clean.failedAttempts,
@@ -91,7 +98,7 @@ class AuthRepository(
         outbox.withTransaction {
             users.update(target.copy(
                 pin_hash = PinHasher.hash(newPin, salt),
-                pin_salt = salt.joinToString("") { "%02x".format(it) },
+                pin_salt = salt.toHex(),
                 failed_attempts = 0, locked_until = null,
                 updated_at = now, version = target.version + 1,
             ))
